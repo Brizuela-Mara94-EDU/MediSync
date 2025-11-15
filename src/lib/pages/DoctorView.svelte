@@ -2,6 +2,8 @@
   import Menu from './medico/Menu.svelte';
   import Content from './medico/Content.svelte';
   
+  let { onLogout } = $props();
+  
   let activeSection = $state('dashboard');
   
   function handleSectionChange(section) {
@@ -10,7 +12,7 @@
 </script>
 
 <div class="dashboard">
-  <Menu activeSection={activeSection} onSectionChange={handleSectionChange} />
+  <Menu activeSection={activeSection} onSectionChange={handleSectionChange} onLogout={onLogout} />
   <Content activeSection={activeSection} />
 </div>
 

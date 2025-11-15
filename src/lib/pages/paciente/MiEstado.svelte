@@ -68,7 +68,7 @@
   .section-header svg {
     width: 32px;
     height: 32px;
-    color: #3b82f6;
+    color: var(--color-600);
   }
   
   .section-header h4 {
@@ -85,7 +85,7 @@
   
   .add-btn {
     padding: 12px 32px;
-    background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+    background: linear-gradient(135deg, var(--color-600) 0%, var(--color-500) 100%);
     color: white;
     border: none;
     border-radius: 12px;

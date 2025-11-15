@@ -1,14 +1,20 @@
 <script>
+  import { onMount } from 'svelte';
+  import { supabase } from '../supabase/supabase-client.js';
+  import SessionManager from '../utils/SessionManager.js';
   import Home from './paciente/Home.svelte';
   import MiEstado from './paciente/MiEstado.svelte';
   import Historial from './paciente/Historial.svelte';
+  import Perfil from './paciente/Perfil.svelte';
 
   let { onLogout } = $props();
   
   let activeTab = $state('medicamentos');
   let showMenu = $state(false);
   let showNotifications = $state(false);
-
+  let loading = $state(true);
+  let pacienteData = $state(null);
+  
   function handleLogout() {
     if (confirm('¿Estás seguro de que deseas cerrar sesión?')) {
       showMenu = false;
@@ -23,16 +29,220 @@
     day: 'numeric' 
   });
   
-  let medicamentos = $state([
-    { nombre: 'Omeprazol', dosis: '20mg', hora: '08:00', tomado: false, tipo: 'Cápsula' },
-    { nombre: 'Metformina', dosis: '850mg', hora: '12:00', tomado: false, tipo: 'Tableta' },
-    { nombre: 'Atorvastatina', dosis: '10mg', hora: '14:00', tomado: false, tipo: 'Tableta' },
-    { nombre: 'Aspirina', dosis: '100mg', hora: '18:00', tomado: false, tipo: 'Tableta' },
-    { nombre: 'Losartán', dosis: '50mg', hora: '20:00', tomado: true, tipo: 'Tableta' }
-  ]);
+  let medicamentos = $state([]);
+
+  onMount(async () => {
+    await cargarDatosPaciente();
+    await cargarMedicamentos();
+  });
+
+  async function cargarDatosPaciente() {
+    try {
+      const sesion = SessionManager.obtenerSesion();
+      if (!sesion?.id_usuario) return;
+
+      // Obtener datos del paciente
+      const { data: paciente, error } = await supabase
+        .from('pacientes')
+        .select(`
+          *,
+          usuarios!inner (
+            nombre,
+            apellido,
+            dni
+          )
+        `)
+        .eq('id_usuario', sesion.id_usuario)
+        .single();
+
+      if (error) {
+        console.error('Error cargando datos del paciente:', error);
+        return;
+      }
+
+      pacienteData = {
+        ...paciente,
+        nombre: paciente.usuarios.nombre,
+        apellido: paciente.usuarios.apellido,
+        dni: paciente.usuarios.dni
+      };
+
+    } catch (error) {
+      console.error('Error:', error);
+    }
+  }
+
+  async function cargarMedicamentos() {
+    try {
+      const sesion = SessionManager.obtenerSesion();
+      if (!sesion?.id_usuario) return;
+
+      // Obtener id_paciente
+      const { data: pacienteInfo } = await supabase
+        .from('pacientes')
+        .select('id_paciente')
+        .eq('id_usuario', sesion.id_usuario)
+        .single();
+
+      if (!pacienteInfo) return;
+
+      // Obtener medicamentos activos con sus detalles
+      const { data: detalles, error } = await supabase
+        .from('detalle_receta')
+        .select(`
+          id_detalle,
+          nombre_medicamento,
+          dosis,
+          frecuencia,
+          duracion_dias,
+          cantidad_total,
+          instrucciones_detalladas,
+          recetas!inner (
+            id_receta,
+            id_paciente,
+            fecha_emision,
+            estado
+          )
+        `)
+        .eq('recetas.id_paciente', pacienteInfo.id_paciente)
+        .eq('recetas.estado', 'activa');
+
+      if (error) {
+        console.error('Error cargando medicamentos:', error);
+        return;
+      }
+
+      const ahora = new Date();
+      medicamentos = [];
+
+      console.log('Detalles recibidos:', detalles);
+
+      detalles?.forEach(detalle => {
+        try {
+          console.log('Procesando detalle:', detalle);
+          // Parsear instrucciones_detalladas para obtener horarios y frecuencia
+          let instruccionesObj = {};
+          try {
+            instruccionesObj = JSON.parse(detalle.instrucciones_detalladas || '{}');
+          } catch {
+            instruccionesObj = {};
+          }
+
+          console.log('Instrucciones parseadas:', instruccionesObj);
+
+          const frecuenciaHoras = instruccionesObj.frecuencia_horas;
+          const horaPrimeraToma = instruccionesObj.hora_primera_toma;
+          
+          if (!frecuenciaHoras || !horaPrimeraToma) {
+            console.warn('Falta frecuencia_horas o hora_primera_toma:', { frecuenciaHoras, horaPrimeraToma });
+            return;
+          }
+
+          // Obtener última toma registrada del localStorage
+          const ultimaToma = obtenerUltimaToma(detalle.id_detalle);
+          
+          // Calcular próxima hora de toma
+          let proximaToma;
+          if (ultimaToma) {
+            // Si ya tomó antes, calcular siguiente basado en última toma
+            proximaToma = new Date(ultimaToma.getTime() + frecuenciaHoras * 60 * 60 * 1000);
+          } else {
+            // Primera toma: usar la hora especificada del día actual
+            const [horas, minutos] = horaPrimeraToma.split(':').map(Number);
+            proximaToma = new Date();
+            proximaToma.setHours(horas, minutos, 0, 0);
+            
+            // Si ya pasó la hora hoy, calcular siguiente toma
+            if (proximaToma < ahora) {
+              const diff = ahora.getTime() - proximaToma.getTime();
+              const tomasTranscurridas = Math.ceil(diff / (frecuenciaHoras * 60 * 60 * 1000));
+              proximaToma = new Date(proximaToma.getTime() + tomasTranscurridas * frecuenciaHoras * 60 * 60 * 1000);
+            }
+          }
+
+          // Mostrar solo si es la hora actual o próxima (dentro de 1 hora)
+          const tiempoRestante = proximaToma.getTime() - ahora.getTime();
+          const unHoraEnMs = 60 * 60 * 1000;
+          
+          console.log('Tiempo restante para', detalle.nombre_medicamento, ':', tiempoRestante / 60000, 'minutos');
+          
+          // Ventana ampliada: 2 horas antes a 8 horas adelante para testing
+          if (tiempoRestante <= 8 * unHoraEnMs && tiempoRestante >= -2 * unHoraEnMs) {
+            const receta = Array.isArray(detalle.recetas) ? detalle.recetas[0] : detalle.recetas;
+            
+            console.log('Agregando medicamento:', detalle.nombre_medicamento);
+            
+            medicamentos.push({
+              id_detalle: detalle.id_detalle,
+              nombre: detalle.nombre_medicamento,
+              dosis: detalle.dosis,
+              hora: proximaToma.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
+              fecha_hora_programada: proximaToma.toISOString(),
+              tomado: false,
+              tipo: 'Medicamento',
+              duracion_dias: detalle.duracion_dias,
+              cantidad_total: detalle.cantidad_total,
+              instrucciones: instruccionesObj.instrucciones || detalle.instrucciones_detalladas,
+              frecuencia_horas: frecuenciaHoras,
+              receta_id: receta?.id_receta,
+              fecha_receta: receta?.fecha_emision
+            });
+          } else {
+            console.log('Medicamento fuera de ventana:', detalle.nombre_medicamento, 'tiempo restante:', tiempoRestante / 60000, 'minutos');
+          }
+        } catch (err) {
+          console.error('Error procesando medicamento:', err);
+        }
+      });
+
+      loading = false;
+      console.log('Medicamentos cargados:', medicamentos);
+
+    } catch (error) {
+      console.error('Error cargando medicamentos:', error);
+      loading = false;
+    }
+  }
+
+  // Obtener última toma de un medicamento del localStorage
+  function obtenerUltimaToma(idDetalle) {
+    try {
+      const tomas = JSON.parse(localStorage.getItem('tomas_medicamentos') || '{}');
+      const fechaStr = tomas[idDetalle];
+      return fechaStr ? new Date(fechaStr) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Guardar toma en localStorage
+  function guardarToma(idDetalle) {
+    try {
+      const tomas = JSON.parse(localStorage.getItem('tomas_medicamentos') || '{}');
+      tomas[idDetalle] = new Date().toISOString();
+      localStorage.setItem('tomas_medicamentos', JSON.stringify(tomas));
+    } catch (err) {
+      console.error('Error guardando toma:', err);
+    }
+  }
   
-  function marcarTomado(medicamento) {
-    medicamento.tomado = !medicamento.tomado;
+  async function marcarTomado(medicamento) {
+    try {
+      // Guardar la toma en localStorage
+      guardarToma(medicamento.id_detalle);
+
+      // Marcar como tomado visualmente
+      medicamento.tomado = true;
+
+      // Esperar un momento y recargar para mostrar la siguiente toma
+      setTimeout(() => {
+        cargarMedicamentos();
+      }, 1500);
+
+    } catch (error) {
+      console.error('Error marcando toma:', error);
+      alert('Error al marcar el medicamento como tomado');
+    }
   }
   
   function changeTab(newTab) {
@@ -45,7 +255,7 @@
     if (action === 'logout') {
       handleLogout();
     } else if (action === 'perfil') {
-      alert('Ir a Perfil - Funcionalidad próximamente');
+      changeTab('perfil');
     } else if (action === 'configuracion') {
       alert('Ir a Configuración - Funcionalidad próximamente');
     } else if (action === 'citas') {
@@ -71,8 +281,8 @@
           </svg>
         </div>
         <div class="profile-info">
-          <h2>Juan Pérez</h2>
-          <p>Paciente ID: 12345</p>
+          <h2>{pacienteData ? `${pacienteData.nombre} ${pacienteData.apellido}` : 'Cargando...'}</h2>
+          <p>DNI: {pacienteData?.dni || '...'}</p>
         </div>
         
         {#if showMenu}
@@ -194,16 +404,41 @@
 
   <div class="date-section">
     <h3>{currentDate.charAt(0).toUpperCase() + currentDate.slice(1)}</h3>
-    <p>Tienes 4 medicamentos pendientes</p>
+    <p>
+      {#if loading}
+        Cargando medicamentos...
+      {:else if medicamentos.length === 0}
+        No tienes medicamentos asignados
+      {:else}
+        Tienes {medicamentos.filter(m => !m.tomado).length} medicamento{medicamentos.filter(m => !m.tomado).length !== 1 ? 's' : ''} pendiente{medicamentos.filter(m => !m.tomado).length !== 1 ? 's' : ''}
+      {/if}
+    </p>
   </div>
 
   <main class="content">
     {#if activeTab === 'medicamentos'}
-      <Home medicamentos={medicamentos} onToggleMed={marcarTomado} />
+      {#if loading}
+        <div class="loading-state">
+          <p>Cargando tus medicamentos...</p>
+        </div>
+      {:else if medicamentos.length === 0}
+        <div class="empty-state">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect width="20" height="14" x="2" y="7" rx="2" ry="2"/>
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+          </svg>
+          <h3>No tienes medicamentos asignados</h3>
+          <p>Tu médico aún no te ha prescrito ningún medicamento</p>
+        </div>
+      {:else}
+        <Home medicamentos={medicamentos} onToggleMed={marcarTomado} />
+      {/if}
     {:else if activeTab === 'estado'}
       <MiEstado />
     {:else if activeTab === 'historial'}
       <Historial />
+    {:else if activeTab === 'perfil'}
+      <Perfil onVolver={() => changeTab('medicamentos')} />
     {/if}
   </main>
 
@@ -242,14 +477,14 @@
   
   .app-container {
     min-height: 100vh;
-    background: linear-gradient(to bottom, #e0f2fe 0%, #f0f9ff 100%);
+    background: linear-gradient(to bottom, var(--color-50) 0%, var(--color-100) 100%);
     padding-bottom: 80px;
     max-width: 100%;
     overflow-x: hidden;
   }
   
   .header {
-    background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+    background: linear-gradient(135deg, var(--color-600) 0%, var(--color-500) 100%);
     padding: 20px;
     color: white;
   }
@@ -492,7 +727,7 @@
   }
   
   .notification-icon.new {
-    background: #dbeafe;
+    background: var(--color-100);
   }
   
   .notification-icon svg {
@@ -502,7 +737,7 @@
   }
   
   .notification-icon.new svg {
-    color: #3b82f6;
+    color: var(--color-600);
   }
   
   .notification-content {
@@ -555,6 +790,36 @@
     max-width: 1200px;
     margin: 0 auto;
   }
+
+  .loading-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: #64748b;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: #64748b;
+  }
+
+  .empty-state svg {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 1rem;
+    opacity: 0.3;
+  }
+
+  .empty-state h3 {
+    margin: 0 0 0.5rem 0;
+    color: #1e293b;
+    font-size: 1.25rem;
+  }
+
+  .empty-state p {
+    margin: 0;
+    font-size: 0.95rem;
+  }
   
   .bottom-nav {
     position: fixed;
@@ -589,8 +854,8 @@
   }
   
   .nav-item.active {
-    color: #3b82f6;
-    background: #e0f2fe;
+    color: var(--color-600);
+    background: var(--color-100);
   }
   
   @media (max-width: 768px) {

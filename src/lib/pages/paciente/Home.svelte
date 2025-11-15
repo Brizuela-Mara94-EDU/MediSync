@@ -5,7 +5,7 @@
 </script>
 
 <div class="medications-list">
-  {#each medicamentos as med (med.nombre)}
+  {#each medicamentos as med (med.id_detalle)}
     <MedicationCard med={med} onToggle={onToggleMed} />
   {/each}
 </div>

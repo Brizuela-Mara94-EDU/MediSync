@@ -53,7 +53,7 @@
     gap: 8px;
     background: none;
     border: none;
-    color: #3b82f6;
+    color: var(--color-600);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
@@ -120,7 +120,7 @@
   .submit-btn {
     width: 100%;
     padding: 14px;
-    background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+    background: linear-gradient(135deg, var(--color-600) 0%, var(--color-500) 100%);
     color: white;
     border: none;
     border-radius: 12px;

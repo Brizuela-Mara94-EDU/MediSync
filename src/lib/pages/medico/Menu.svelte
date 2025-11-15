@@ -1,15 +1,24 @@
 <script>
-  let { activeSection, onSectionChange } = $props();
+  import { obtenerSesion } from '../../utils/SessionManager.js';
+  
+  let { activeSection, onSectionChange, onLogout } = $props();
+  
+  // Obtener datos de la sesión
+  const sesion = obtenerSesion();
+  
+  function handleLogout() {
+    if (confirm('¿Está seguro que desea cerrar sesión?')) {
+      onLogout();
+    }
+  }
 </script>
 
 <aside class="sidebar">
   <div class="logo">
     <div class="logo-icon">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
-      </svg>
+       <img src="../../../src/assets/Logo.png" alt="MediSync">
     </div>
-    <h1>MediCare Pro</h1>
+    <h1>MediSync</h1>
   </div>
   
   <nav class="nav-menu">
@@ -66,6 +75,18 @@
       </svg>
       <span>Historial</span>
     </button>
+    
+    <button 
+      class="nav-btn logout-btn"
+      onclick={handleLogout}
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+        <polyline points="16 17 21 12 16 7"/>
+        <line x1="21" x2="9" y1="12" y2="12"/>
+      </svg>
+      <span>Cerrar Sesión</span>
+    </button>
   </nav>
   
   <div class="profile-section">
@@ -76,7 +97,7 @@
       </svg>
     </div>
     <div class="profile-info">
-      <p class="profile-name">Dr. López</p>
+      <p class="profile-name">Dr. {sesion?.nombre || 'Médico'} {sesion?.apellido || ''}</p>
       <p class="profile-role">Médico General</p>
     </div>
   </div>
@@ -86,7 +107,7 @@
   .sidebar {
     width: 260px;
     min-width: 260px;
-    background: linear-gradient(180deg, #1e40af 0%, #1e3a8a 100%);
+    background: linear-gradient(180deg, var(--color-500) 0%, var(--color-700) 100%);
     color: white;
     padding: 24px;
     display: flex;
@@ -99,22 +120,26 @@
   
   .logo {
     margin-bottom: 40px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
   
   .logo-icon {
-    width: 48px;
-    height: 48px;
+    width: 40px;
+    height: 40px;
     background: rgba(255, 255, 255, 0.2);
-    border-radius: 12px;
+    border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 12px;
+    flex-shrink: 0;
   }
   
-  .logo-icon svg {
+  .logo-icon img {
     width: 28px;
     height: 28px;
+    object-fit: contain;
   }
   
   .logo h1 {
@@ -146,18 +171,31 @@
   }
   
   .nav-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-600);
     color: white;
   }
   
   .nav-btn.active {
-    background: rgba(255, 255, 255, 0.2);
+    background: var(--color-600);
     color: white;
+    font-weight: 600;
+  }
+  
+  .nav-btn.logout-btn {
+    margin-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 20px;
+  }
+  
+  .nav-btn.logout-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
   }
   
   .nav-btn svg {
     width: 20px;
     height: 20px;
+    flex-shrink: 0;
   }
   
   .profile-section {
@@ -165,7 +203,7 @@
     align-items: center;
     gap: 12px;
     padding: 16px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-600);
     border-radius: 12px;
     margin-top: 20px;
   }
@@ -178,6 +216,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
   }
   
   .profile-avatar svg {
@@ -187,6 +226,7 @@
   
   .profile-info {
     flex: 1;
+    min-width: 0;
   }
   
   .profile-name {
