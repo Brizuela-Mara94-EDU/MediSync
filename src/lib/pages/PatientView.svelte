@@ -121,6 +121,16 @@
       const ahora = new Date();
       const medicamentosActualizados = [];
 
+      console.log('=== INICIO CARGA DE MEDICAMENTOS ===');
+      console.log('Fecha/Hora actual:', ahora.toLocaleString('es-AR'));
+
+      // CONFIGURACIÓN DE VENTANA DE TIEMPO - MODIFICR AQUÍ
+      const HORAS_ANTES = 4;    //  Cambiar : horas ANTES de la toma 
+      const HORAS_DESPUES = 4;  //  Cambiar : horas DESPUÉS de la toma para seguir mostrando medicamento
+      
+      const VENTANA_ANTES = HORAS_ANTES * 60 * 60 * 1000;
+      const VENTANA_DESPUES = HORAS_DESPUES * 60 * 60 * 1000;
+
       detalles?.forEach(detalle => {
         try {
           let instruccionesObj = {};
@@ -135,11 +145,13 @@
           const duracionDias = detalle.duracion_dias;
           
           if (!frecuenciaHoras || !horaPrimeraToma) {
+            console.log(`❌ ${detalle.nombre_medicamento}: Falta frecuencia u hora`);
             return;
           }
 
           const receta = Array.isArray(detalle.recetas) ? detalle.recetas[0] : detalle.recetas;
           if (!receta?.fecha_emision) {
+            console.log(`❌ ${detalle.nombre_medicamento}: Sin fecha de receta`);
             return;
           }
 
@@ -155,13 +167,24 @@
             fechaFinTratamiento = new Date('2099-12-31');
           }
 
-          if (ahora < fechaInicioTratamiento || ahora > fechaFinTratamiento) {
-            console.log(`⏭️ Medicamento ${detalle.nombre_medicamento} fuera de período`);
+          console.log(`\n📋 ${detalle.nombre_medicamento}:`);
+          console.log('  Inicio:', fechaInicioTratamiento.toLocaleString('es-AR'));
+          console.log('  Fin:', fechaFinTratamiento.toLocaleString('es-AR'));
+          console.log('  Duración:', duracionDias, 'días');
+
+          if (ahora < fechaInicioTratamiento) {
+            console.log(`  ⏭️ Aún no comenzó el tratamiento`);
+            return;
+          }
+
+          if (ahora > fechaFinTratamiento) {
+            console.log(`  ⏭️ Tratamiento finalizado`);
             return;
           }
 
           // Obtener historial de tomas
           const historialTomas = obtenerHistorialTomas(detalle.id_detalle);
+          console.log('  📝 Tomas registradas:', historialTomas.length);
           
           // ✅ Calcular próxima hora PROGRAMADA (no basada en cuándo se tomó)
           const proximaTomaProgramada = calcularProximaHoraProgramada(
@@ -169,38 +192,41 @@
             frecuenciaHoras, 
             historialTomas,
             ahora,
-            fechaInicioTratamiento
+            fechaInicioTratamiento,
+            VENTANA_DESPUES  // Pasar la ventana para buscar pendientes
           );
 
           if (!proximaTomaProgramada) {
+            console.log(`  ❌ No hay próxima toma programada`);
             return;
           }
+
+          console.log('  🎯 Próxima toma:', proximaTomaProgramada.toLocaleString('es-AR'));
 
           if (proximaTomaProgramada > fechaFinTratamiento) {
-            console.log(`⏭️ Próxima toma de ${detalle.nombre_medicamento} fuera del período de tratamiento`);
+            console.log(`  ⏭️ Próxima toma fuera del período de tratamiento`);
             return;
           }
 
-          // Ventana de visualización: 15 minutos antes y 2 horas después
-          const tiempoRestante = proximaTomaProgramada.getTime() - ahora.getTime();
-          const VENTANA_ANTES = 15 * 60 * 1000;  // 15 minutos antes MODIFICAR PARA PRUEBAS
-          const VENTANA_DESPUES = 2 * 60 * 60 * 1000; // 2 horas
-          
           // ✅ Verificar si esta hora programada específica ya fue marcada como tomada
           const yaFueTomadaEstaHora = historialTomas.some(toma => {
             const fechaToma = new Date(toma);
-            // Tolerancia de 1 minuto para considerar que es la misma hora programada
-            return Math.abs(fechaToma.getTime() - proximaTomaProgramada.getTime()) < 60000;
+            // Tolerancia de 30 minutos para considerar que es la misma hora programada
+            return Math.abs(fechaToma.getTime() - proximaTomaProgramada.getTime()) < 30 * 60 * 1000;
           });
 
           if (yaFueTomadaEstaHora) {
-            console.log(`✅ Ya tomado: ${detalle.nombre_medicamento} programado para ${proximaTomaProgramada.toLocaleTimeString('es-AR')}`);
-            return; // No mostrar si ya fue tomado en esta hora programada
+            console.log(`  ✅ Ya tomado en esta hora programada`);
+            return;
           }
+          
+          const tiempoRestante = proximaTomaProgramada.getTime() - ahora.getTime();
+          
+          console.log('  ⏱️ Tiempo restante:', Math.round(tiempoRestante / 60000), 'minutos');
           
           // Mostrar solo si está dentro de la ventana de tiempo
           if (tiempoRestante <= VENTANA_ANTES && tiempoRestante >= -VENTANA_DESPUES) {
-            console.log(`📋 Mostrando: ${detalle.nombre_medicamento} para ${proximaTomaProgramada.toLocaleTimeString('es-AR')}`);
+            console.log(`  ✅ MOSTRANDO medicamento`);
             
             medicamentosActualizados.push({
               id_detalle: detalle.id_detalle,
@@ -221,19 +247,28 @@
               es_atrasado: tiempoRestante < 0
             });
           } else {
-            console.log(`⏰ Fuera de ventana: ${detalle.nombre_medicamento} programado para ${proximaTomaProgramada.toLocaleTimeString('es-AR')} (${Math.round(tiempoRestante / 60000)} min)`);
+            console.log(`  ⏰ Fuera de ventana (${Math.round(tiempoRestante / 60000)} min)`);
           }
         } catch (err) {
           console.error('Error procesando medicamento:', err);
         }
       });
 
-      // Ordenar por hora de toma
+      // ✅ Ordenar primero por nombre y luego por hora para mantener posiciones consistentes
       medicamentosActualizados.sort((a, b) => {
+        // Primero ordenar por nombre del medicamento
+        const nombreComp = a.nombre.localeCompare(b.nombre);
+        if (nombreComp !== 0) return nombreComp;
+        
+        // Si son el mismo medicamento, ordenar por hora
         const fechaA = new Date(a.fecha_hora_programada);
         const fechaB = new Date(b.fecha_hora_programada);
         return fechaA.getTime() - fechaB.getTime();
       });
+
+      console.log('\n=== RESUMEN ===');
+      console.log('Total medicamentos a mostrar:', medicamentosActualizados.length);
+      console.log('=== FIN CARGA ===\n');
 
       medicamentos = medicamentosActualizados;
       loading = false;
@@ -245,7 +280,7 @@
   }
 
   // ✅ NUEVA FUNCIÓN: Calcular próxima HORA PROGRAMADA (independiente de cuándo se tomó)
-  function calcularProximaHoraProgramada(horaPrimeraToma, frecuenciaHoras, historialTomas, ahora, fechaInicioTratamiento) {
+  function calcularProximaHoraProgramada(horaPrimeraToma, frecuenciaHoras, historialTomas, ahora, fechaInicioTratamiento, ventanaDespues) {
     const [horas, minutos] = horaPrimeraToma.split(':').map(Number);
     
     // Para medicamentos semanales/mensuales (>= 24 horas)
@@ -258,17 +293,18 @@
       // Calcular todas las horas programadas desde el inicio
       let horaProgramada = new Date(primeraTomaTratamiento);
       
-      while (horaProgramada <= ahora) {
+      // Buscar la primera hora no tomada (incluyendo pasadas recientes)
+      while (horaProgramada < ahora) {
         // Verificar si esta hora ya fue tomada
         const yaFueTomada = historialTomas.some(toma => {
           const fechaToma = new Date(toma);
-          return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 60000;
+          return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 30 * 60 * 1000;
         });
         
-        // Si no fue tomada y es una hora pasada reciente, podría mostrarse (ventana de 2h)
+        // Si no fue tomada y está dentro de la ventana, mostrarla
         if (!yaFueTomada) {
           const tiempoDesdeHora = ahora.getTime() - horaProgramada.getTime();
-          if (tiempoDesdeHora <= 2 * 60 * 60 * 1000) { // Dentro de 2 horas
+          if (tiempoDesdeHora <= ventanaDespues) {
             return horaProgramada;
           }
         }
@@ -283,20 +319,26 @@
     // Para medicamentos diarios (< 24 horas) - Ej: cada 2, 4, 6, 8 horas
     const tomasPorDia = Math.floor(24 / frecuenciaHoras);
     
-    // Generar todas las horas programadas de hoy y mañana
+    // Generar horas programadas desde ayer hasta mañana
     const horasProgramadas = [];
     
-    // Horas de hoy
-    const hoyInicio = new Date(ahora);
-    hoyInicio.setHours(0, 0, 0, 0);
+    const ayerInicio = new Date(ahora);
+    ayerInicio.setDate(ayerInicio.getDate() - 1);
+    ayerInicio.setHours(0, 0, 0, 0);
     
-    for (let dia = 0; dia < 2; dia++) { // Hoy y mañana
-      const diaBase = new Date(hoyInicio);
+    for (let dia = 0; dia < 3; dia++) { // Ayer, hoy y mañana
+      const diaBase = new Date(ayerInicio);
       diaBase.setDate(diaBase.getDate() + dia);
       
       for (let i = 0; i < tomasPorDia; i++) {
         const horaProgramada = new Date(diaBase);
-        horaProgramada.setHours(horas + (i * frecuenciaHoras), minutos, 0, 0);
+        const horasTotales = horas + (i * frecuenciaHoras);
+        horaProgramada.setHours(horasTotales % 24, minutos, 0, 0);
+        
+        // Ajustar el día si las horas se pasan de 24
+        if (horasTotales >= 24) {
+          horaProgramada.setDate(horaProgramada.getDate() + Math.floor(horasTotales / 24));
+        }
         
         // Solo agregar si es después del inicio del tratamiento
         if (horaProgramada >= fechaInicioTratamiento) {
@@ -308,15 +350,18 @@
     // Ordenar cronológicamente
     horasProgramadas.sort((a, b) => a.getTime() - b.getTime());
     
-    // Encontrar la primera hora programada que:
-    // 1. No haya sido tomada, Y
-    // 2. Esté dentro de la ventana de visualización (15 min antes hasta 2h después de ahora)
-    
+    // Encontrar la primera hora programada pendiente
     for (const horaProgramada of horasProgramadas) {
-      // Verificar si ya fue tomada
+      // Si la hora ya pasó hace más tiempo que la ventana, saltarla
+      const tiempoDesdeHora = ahora.getTime() - horaProgramada.getTime();
+      if (tiempoDesdeHora > ventanaDespues) {
+        continue;
+      }
+      
+      // Verificar si ya fue tomada (tolerancia de 30 minutos)
       const yaFueTomada = historialTomas.some(toma => {
         const fechaToma = new Date(toma);
-        return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 60000;
+        return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 30 * 60 * 1000;
       });
       
       if (!yaFueTomada) {
@@ -324,8 +369,9 @@
       }
     }
     
-    // Si todas fueron tomadas, retornar null (no hay pendientes)
-    return null;
+    // Si no hay pendientes recientes, retornar la próxima futura
+    const proximaFutura = horasProgramadas.find(h => h > ahora);
+    return proximaFutura || null;
   }
 
   // Obtener historial de tomas del localStorage

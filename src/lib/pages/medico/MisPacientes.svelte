@@ -170,24 +170,20 @@
 
       if (medicoError) throw medicoError;
 
-      // 1. Crear usuario con contraseña por defecto
+      // 1. Crear usuario usando la función RPC (que maneja el hash automáticamente)
       const contrasenaPorDefecto = nuevoUsuario.dni; // Usar DNI como contraseña inicial
       
-      const { data: usuarioCreado, error: errorUsuario } = await supabase
-        .from('usuarios')
-        .insert({
-          nombre: nuevoUsuario.nombre,
-          apellido: nuevoUsuario.apellido,
-          dni: nuevoUsuario.dni,
-          email: nuevoUsuario.email,
-          telefono: nuevoUsuario.telefono,
-          fecha_nacimiento: nuevoUsuario.fecha_nacimiento,
-          contrasena: contrasenaPorDefecto,
-          rol: 'paciente',
-          activo: true
-        })
-        .select()
-        .single();
+      const { data: usuarioId, error: errorUsuario } = await supabase
+        .rpc('registrar_usuario', {
+          p_email: nuevoUsuario.email,
+          p_contrasena: contrasenaPorDefecto,
+          p_nombre: nuevoUsuario.nombre,
+          p_apellido: nuevoUsuario.apellido,
+          p_dni: nuevoUsuario.dni,
+          p_fecha_nacimiento: nuevoUsuario.fecha_nacimiento,
+          p_telefono: nuevoUsuario.telefono || null,
+          p_rol: 'paciente'
+        });
 
       if (errorUsuario) throw errorUsuario;
 
@@ -195,7 +191,7 @@
       const { data: pacienteCreado, error: errorPaciente } = await supabase
         .from('pacientes')
         .insert({
-          id_usuario: usuarioCreado.id_usuario,
+          id_usuario: usuarioId,
           domicilio: nuevoPaciente.domicilio,
           obra_social: nuevoPaciente.obra_social,
           grupo_sanguineo: nuevoPaciente.grupo_sanguineo
