@@ -51,7 +51,8 @@
 
   async function cargarRecetas() {
     try {
-      const { data, error } = await supabase
+      // Primero obtener todas las recetas del paciente
+      const { data: recetasData, error: recetasError } = await supabase
         .from('recetas')
         .select(`
           *,
@@ -68,9 +69,39 @@
         .eq('id_paciente', idPaciente)
         .order('fecha_emision', { ascending: false });
 
-      if (error) throw error;
+      if (recetasError) throw recetasError;
 
-      recetas = data || [];
+      // Obtener información de los médicos
+      if (recetasData && recetasData.length > 0) {
+        const idsmedicos = [...new Set(recetasData.map(r => r.id_medico))];
+        
+        const { data: medicosData, error: medicosError } = await supabase
+          .from('medicos')
+          .select(`
+            id_medico,
+            usuarios (
+              nombre,
+              apellido
+            )
+          `)
+          .in('id_medico', idsmedicos);
+
+        if (!medicosError && medicosData) {
+          // Mapear la información de médicos a las recetas
+          recetas = recetasData.map(receta => {
+            const medicoInfo = medicosData.find(m => m.id_medico === receta.id_medico);
+            return {
+              ...receta,
+              medicos: medicoInfo || null
+            };
+          });
+        } else {
+          recetas = recetasData;
+        }
+      } else {
+        recetas = [];
+      }
+
       medicamentos = recetas.flatMap(receta => 
         (receta.detalle_receta || []).map(med => ({
           ...med,
@@ -83,6 +114,20 @@
     } finally {
       loading = false;
     }
+  }
+
+  // Función para verificar si el médico actual puede editar esta receta
+  function puedeEditarReceta(receta) {
+    return receta.id_medico === idMedico;
+  }
+
+  // Función para obtener el nombre del médico
+  function obtenerNombreMedico(receta) {
+    if (receta.medicos?.usuarios) {
+      const { nombre, apellido } = receta.medicos.usuarios;
+      return `${nombre} ${apellido}`;
+    }
+    return 'Médico desconocido';
   }
 
   async function crearReceta() {
@@ -175,11 +220,16 @@
     showRecetaModal = true;
   }
 
-  function abrirModalMedicamento(idReceta = '') {
+  function abrirModalMedicamento(receta) {
+    if (!puedeEditarReceta(receta)) {
+      alert('No tienes permisos para agregar medicamentos a esta receta.');
+      return;
+    }
+    
     editandoMedicamento = false;
     medicamentoAEditar = null;
     nuevoMedicamento = {
-      id_receta: idReceta,
+      id_receta: receta.id_receta,
       nombre_medicamento: '',
       dosis: '',
       frecuencia_horas: '',
@@ -192,7 +242,12 @@
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function abrirModalEditarMedicamento(medicamento: any) {
+  function abrirModalEditarMedicamento(medicamento: any, receta: any) {
+    if (!puedeEditarReceta(receta)) {
+      alert('No tienes permisos para editar medicamentos de esta receta.');
+      return;
+    }
+    
     editandoMedicamento = true;
     medicamentoAEditar = medicamento;
     
@@ -264,7 +319,12 @@
     }
   }
 
-  async function eliminarMedicamento(medicamento) {
+  async function eliminarMedicamento(medicamento, receta) {
+    if (!puedeEditarReceta(receta)) {
+      alert('No tienes permisos para eliminar medicamentos de esta receta.');
+      return;
+    }
+    
     if (!confirm(`¿Estás seguro de eliminar el medicamento "${medicamento.nombre_medicamento}"?`)) {
       return;
     }
@@ -295,6 +355,20 @@
     const tomas = [];
     const [horas, minutos] = horaInicial.split(':').map(Number);
     
+    // Si la frecuencia es mayor a 24 horas, es un tratamiento semanal/mensual
+    if (frecuenciaHoras >= 24) {
+      const dias = Math.floor(frecuenciaHoras / 24);
+      const h = String(horas).padStart(2, '0');
+      const m = String(minutos).padStart(2, '0');
+      
+      return [{
+        hora: `${h}:${m}`,
+        esSemanal: true,
+        dias: dias,
+        descripcion: dias === 7 ? 'semanal' : dias === 14 ? 'quincenal' : dias === 30 ? 'mensual' : `cada ${dias} días`
+      }];
+    }
+    
     let horaActual = horas;
     let minutosActuales = minutos;
     const tomasEnDia = Math.floor(24 / frecuenciaHoras);
@@ -302,7 +376,7 @@
     for (let i = 0; i < tomasEnDia; i++) {
       const h = String(horaActual).padStart(2, '0');
       const m = String(minutosActuales).padStart(2, '0');
-      tomas.push(`${h}:${m}`);
+      tomas.push({ hora: `${h}:${m}`, esSemanal: false });
       
       horaActual += frecuenciaHoras;
       if (horaActual >= 24) horaActual -= 24;
@@ -310,6 +384,46 @@
     
     return tomas;
   }
+
+  // Calcular cantidad total de comprimidos/dosis necesarios
+  function calcularCantidadTotal(frecuenciaHoras, duracionDias, dosisPorToma = 1) {
+    if (!frecuenciaHoras || !duracionDias || frecuenciaHoras <= 0 || duracionDias <= 0) {
+      return 0;
+    }
+
+    // Si la frecuencia es mayor o igual a 24 horas (semanal, mensual, etc)
+    if (frecuenciaHoras >= 24) {
+      const diasEntreTomas = Math.floor(frecuenciaHoras / 24);
+      const numeroTomas = Math.ceil(duracionDias / diasEntreTomas);
+      return numeroTomas * dosisPorToma;
+    }
+
+    // Para medicamentos diarios
+    const tomasPorDia = Math.floor(24 / frecuenciaHoras);
+    const totalTomas = tomasPorDia * duracionDias;
+    return totalTomas * dosisPorToma;
+  }
+
+  // Derived para calcular automáticamente la cantidad
+  let cantidadCalculada = $derived.by(() => {
+    const frecuencia = parseInt(nuevoMedicamento.frecuencia_horas);
+    const duracion = parseInt(nuevoMedicamento.duracion_dias);
+    const dosis = nuevoMedicamento.dosis;
+    
+    // Intentar extraer el número de la dosis (ej: "2 comprimidos" -> 2)
+    let dosisPorToma = 1;
+    if (dosis) {
+      const match = dosis.match(/^(\d+)/);
+      if (match) {
+        dosisPorToma = parseInt(match[1]);
+      }
+    }
+    
+    return calcularCantidadTotal(frecuencia, duracion, dosisPorToma);
+  });
+
+  // Obtener solo las recetas del médico actual para el selector
+  let recetasPropias = $derived(recetas.filter(r => puedeEditarReceta(r)));
 </script>
 
 <div class="recetas-container">
@@ -350,10 +464,19 @@
     {:else}
       <div class="recetas-list">
         {#each recetas as receta}
-          <div class="receta-card">
+          {@const esEditable = puedeEditarReceta(receta)}
+          {@const nombreMedico = obtenerNombreMedico(receta)}
+          
+          <div class="receta-card" class:readonly={!esEditable}>
             <div class="receta-header">
               <div>
-                <h4>Receta #{receta.id_receta.slice(0, 8)}</h4>
+                <div class="receta-title-row">
+                  <h4>Receta #{receta.id_receta.slice(0, 8)}</h4>
+                  {#if !esEditable}
+                    <span class="badge-readonly">Solo lectura</span>
+                  {/if}
+                </div>
+                <p class="receta-medico">👨‍⚕️ Dr. {nombreMedico}</p>
                 <p class="receta-date">
                   {new Date(receta.fecha_emision).toLocaleDateString('es-AR')} • 
                   Válida por {receta.validez_dias} días
@@ -363,12 +486,14 @@
                 <span class="badge {receta.estado === 'activa' ? 'activa' : 'vencida'}">
                   {receta.estado}
                 </span>
-                <button 
-                  class="btn-primary btn-small" 
-                  onclick={() => abrirModalMedicamento(receta.id_receta)}
-                >
-                  + Medicamento
-                </button>
+                {#if esEditable}
+                  <button 
+                    class="btn-primary btn-small" 
+                    onclick={() => abrirModalMedicamento(receta)}
+                  >
+                    + Medicamento
+                  </button>
+                {/if}
               </div>
             </div>
 
@@ -394,26 +519,35 @@
                         <p class="med-quantity">Cantidad total: {medicamento.cantidad_total}</p>
                       {/if}
                     </div>
-                    <div class="med-actions">
-                      <button 
-                        class="btn-icon-edit" 
-                        onclick={() => abrirModalEditarMedicamento(medicamento)}
-                        title="Editar medicamento"
-                      >
+                    {#if esEditable}
+                      <div class="med-actions">
+                        <button 
+                          class="btn-icon-edit" 
+                          onclick={() => abrirModalEditarMedicamento(medicamento, receta)}
+                          title="Editar medicamento"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+                          </svg>
+                        </button>
+                        <button 
+                          class="btn-icon-delete" 
+                          onclick={() => eliminarMedicamento(medicamento, receta)}
+                          title="Eliminar medicamento"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+                          </svg>
+                        </button>
+                      </div>
+                    {:else}
+                      <div class="med-locked">
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+                          <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/>
+                          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                         </svg>
-                      </button>
-                      <button 
-                        class="btn-icon-delete" 
-                        onclick={() => eliminarMedicamento(medicamento)}
-                        title="Eliminar medicamento"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
-                        </svg>
-                      </button>
-                    </div>
+                      </div>
+                    {/if}
                   </div>
                 {/each}
               </div>
@@ -526,12 +660,12 @@
 
       <form onsubmit={(e) => { e.preventDefault(); editandoMedicamento ? actualizarMedicamento() : agregarMedicamento(); }}>
         <div class="modal-body">
-          {#if !editandoMedicamento && recetas.length > 0}
+          {#if !editandoMedicamento && recetasPropias.length > 0}
             <div class="form-group">
               <label for="id_receta">Receta</label>
               <select id="id_receta" bind:value={nuevoMedicamento.id_receta} required>
                 <option value="">Seleccione una receta</option>
-                {#each recetas as receta}
+                {#each recetasPropias as receta}
                   <option value={receta.id_receta}>
                     Receta {new Date(receta.fecha_emision).toLocaleDateString()} - {receta.estado}
                   </option>
@@ -568,12 +702,14 @@
               type="number" 
               id="frecuencia_horas" 
               bind:value={nuevoMedicamento.frecuencia_horas}
-              placeholder="Ej: 8"
+              placeholder="Ej: 8 (cada 8 horas) o 168 (cada 7 días)"
               min="1"
-              max="24"
               required
             />
-            <small>Cada cuántas horas debe tomar el medicamento (ej: 8 = cada 8 horas)</small>
+            <small>
+              Para medicamentos diarios: cada cuántas horas (ej: 8 = cada 8 horas)<br/>
+              Para medicamentos semanales/mensuales: 168 = cada 7 días, 336 = cada 14 días, 720 = cada 30 días
+            </small>
           </div>
 
           <div class="form-group">
@@ -588,16 +724,37 @@
           </div>
 
           {#if nuevoMedicamento.frecuencia_horas && nuevoMedicamento.hora_primera_toma}
+            {@const tomas = calcularTomasDia(nuevoMedicamento.hora_primera_toma, parseInt(nuevoMedicamento.frecuencia_horas))}
             <div class="tomas-preview">
-              <strong>📅 Tomas programadas del día:</strong>
-              <div class="tomas-calculadas">
-                {#each calcularTomasDia(nuevoMedicamento.hora_primera_toma, parseInt(nuevoMedicamento.frecuencia_horas)) as toma}
-                  <span class="toma-chip">🕐 {toma}</span>
-                {/each}
-              </div>
-              <p class="tomas-totales">
-                <strong>Total:</strong> {calcularTomasDia(nuevoMedicamento.hora_primera_toma, parseInt(nuevoMedicamento.frecuencia_horas)).length} toma(s) por día
-              </p>
+              {#if tomas.length > 0 && tomas[0].esSemanal}
+                <strong>📅 Frecuencia de toma:</strong>
+                <div class="tomas-calculadas">
+                  <span class="toma-chip toma-semanal">
+                    🗓️ {tomas[0].hora} - {tomas[0].descripcion}
+                  </span>
+                </div>
+                <p class="tomas-totales">
+                  <strong>Nota:</strong> Este medicamento se toma {tomas[0].descripcion} a las {tomas[0].hora}
+                  {#if nuevoMedicamento.duracion_dias && parseInt(nuevoMedicamento.duracion_dias) > 0}
+                    <br/>
+                    <strong>Durante {nuevoMedicamento.duracion_dias} días</strong> = aproximadamente {Math.ceil(parseInt(nuevoMedicamento.duracion_dias) / tomas[0].dias)} tomas totales
+                  {/if}
+                </p>
+              {:else}
+                <strong>📅 Tomas programadas del día:</strong>
+                <div class="tomas-calculadas">
+                  {#each tomas as toma}
+                    <span class="toma-chip">🕐 {toma.hora}</span>
+                  {/each}
+                </div>
+                <p class="tomas-totales">
+                  <strong>Total:</strong> {tomas.length} toma(s) por día
+                  {#if nuevoMedicamento.duracion_dias && parseInt(nuevoMedicamento.duracion_dias) > 0}
+                    <br/>
+                    <strong>Durante {nuevoMedicamento.duracion_dias} días</strong> = {tomas.length * parseInt(nuevoMedicamento.duracion_dias)} tomas totales
+                  {/if}
+                </p>
+              {/if}
             </div>
           {/if}
 
@@ -608,18 +765,32 @@
               id="duracion_dias" 
               bind:value={nuevoMedicamento.duracion_dias}
               min="1"
+              placeholder="Ej: 7, 30, 60"
             />
+            <small>Por cuántos días debe continuar el tratamiento</small>
           </div>
 
           <div class="form-group">
-            <label for="cantidad_total">Cantidad Total</label>
+            <label for="cantidad_total">
+              Cantidad Total
+              {#if cantidadCalculada > 0}
+                <span class="cantidad-sugerida">💡 Sugerido: {cantidadCalculada}</span>
+              {/if}
+            </label>
             <input 
               type="number" 
               id="cantidad_total" 
               bind:value={nuevoMedicamento.cantidad_total}
               min="1"
-              placeholder="Número de comprimidos/dosis"
+              placeholder={cantidadCalculada > 0 ? `Sugerido: ${cantidadCalculada}` : "Número de comprimidos/dosis"}
             />
+            <small>
+              {#if cantidadCalculada > 0}
+                Cálculo automático: {cantidadCalculada} unidades. Puedes modificar este valor si es necesario.
+              {:else}
+                Número total de comprimidos o dosis necesarios para el tratamiento
+              {/if}
+            </small>
           </div>
 
           <div class="form-group">
@@ -799,6 +970,15 @@
     transform: translateY(-2px);
   }
 
+  .receta-card.readonly {
+    background: linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%);
+    border-color: #e0e0e0;
+  }
+
+  .receta-card.readonly:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+
   .receta-header {
     display: flex;
     justify-content: space-between;
@@ -806,11 +986,25 @@
     margin-bottom: 1rem;
   }
 
+  .receta-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
   .receta-header h4 {
-    margin: 0 0 0.25rem 0;
+    margin: 0;
     color: var(--color-900);
     font-size: 16px;
     font-weight: 600;
+  }
+
+  .receta-medico {
+    margin: 0.25rem 0;
+    font-size: 0.9rem;
+    color: var(--color-800);
+    font-weight: 500;
   }
 
   .receta-date {
@@ -855,6 +1049,11 @@
     border: 1px solid var(--color-100);
   }
 
+  .readonly .medicamento-item {
+    background: white;
+    border-color: #e0e0e0;
+  }
+
   .med-icon {
     font-size: 1.5rem;
   }
@@ -866,6 +1065,20 @@
   .med-actions {
     display: flex;
     gap: 0.5rem;
+  }
+
+  .med-locked {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    color: #9e9e9e;
+  }
+
+  .med-locked svg {
+    width: 20px;
+    height: 20px;
   }
 
   .btn-icon-edit,
@@ -941,6 +1154,19 @@
   .badge.vencida {
     background: #fee2e2;
     color: #991b1b;
+  }
+
+  .badge-readonly {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
   }
 
   .empty-meds {
@@ -1028,6 +1254,17 @@
     font-size: 14px;
   }
 
+  .cantidad-sugerida {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    background: #dcfce7;
+    color: #166534;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
   .form-group input,
   .form-group select,
   .form-group textarea {
@@ -1093,6 +1330,14 @@
     font-size: 0.9rem;
     color: #0369a1;
     font-weight: 600;
+  }
+
+  .toma-chip.toma-semanal {
+    background: #fef3c7;
+    border-color: #f59e0b;
+    color: #92400e;
+    padding: 0.6rem 1rem;
+    font-size: 0.95rem;
   }
 
   .tomas-totales {

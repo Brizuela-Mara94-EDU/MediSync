@@ -31,9 +31,18 @@
   
   let medicamentos = $state([]);
 
-  onMount(async () => {
-    await cargarDatosPaciente();
-    await cargarMedicamentos();
+  onMount(() => {
+    cargarDatosPaciente();
+    cargarMedicamentos();
+    
+    // Recargar medicamentos cada minuto
+    const interval = setInterval(() => {
+      cargarMedicamentos();
+    }, 60000);
+    
+    return () => {
+      clearInterval(interval);
+    };
   });
 
   async function cargarDatosPaciente() {
@@ -41,7 +50,6 @@
       const sesion = SessionManager.obtenerSesion();
       if (!sesion?.id_usuario) return;
 
-      // Obtener datos del paciente
       const { data: paciente, error } = await supabase
         .from('pacientes')
         .select(`
@@ -77,7 +85,6 @@
       const sesion = SessionManager.obtenerSesion();
       if (!sesion?.id_usuario) return;
 
-      // Obtener id_paciente
       const { data: pacienteInfo } = await supabase
         .from('pacientes')
         .select('id_paciente')
@@ -86,7 +93,6 @@
 
       if (!pacienteInfo) return;
 
-      // Obtener medicamentos activos con sus detalles
       const { data: detalles, error } = await supabase
         .from('detalle_receta')
         .select(`
@@ -113,14 +119,10 @@
       }
 
       const ahora = new Date();
-      medicamentos = [];
-
-      console.log('Detalles recibidos:', detalles);
+      const medicamentosActualizados = [];
 
       detalles?.forEach(detalle => {
         try {
-          console.log('Procesando detalle:', detalle);
-          // Parsear instrucciones_detalladas para obtener horarios y frecuencia
           let instruccionesObj = {};
           try {
             instruccionesObj = JSON.parse(detalle.instrucciones_detalladas || '{}');
@@ -128,75 +130,113 @@
             instruccionesObj = {};
           }
 
-          console.log('Instrucciones parseadas:', instruccionesObj);
-
           const frecuenciaHoras = instruccionesObj.frecuencia_horas;
           const horaPrimeraToma = instruccionesObj.hora_primera_toma;
+          const duracionDias = detalle.duracion_dias;
           
           if (!frecuenciaHoras || !horaPrimeraToma) {
-            console.warn('Falta frecuencia_horas o hora_primera_toma:', { frecuenciaHoras, horaPrimeraToma });
             return;
           }
 
-          // Obtener última toma registrada del localStorage
-          const ultimaToma = obtenerUltimaToma(detalle.id_detalle);
-          
-          // Calcular próxima hora de toma
-          let proximaToma;
-          if (ultimaToma) {
-            // Si ya tomó antes, calcular siguiente basado en última toma
-            proximaToma = new Date(ultimaToma.getTime() + frecuenciaHoras * 60 * 60 * 1000);
-          } else {
-            // Primera toma: usar la hora especificada del día actual
-            const [horas, minutos] = horaPrimeraToma.split(':').map(Number);
-            proximaToma = new Date();
-            proximaToma.setHours(horas, minutos, 0, 0);
-            
-            // Si ya pasó la hora hoy, calcular siguiente toma
-            if (proximaToma < ahora) {
-              const diff = ahora.getTime() - proximaToma.getTime();
-              const tomasTranscurridas = Math.ceil(diff / (frecuenciaHoras * 60 * 60 * 1000));
-              proximaToma = new Date(proximaToma.getTime() + tomasTranscurridas * frecuenciaHoras * 60 * 60 * 1000);
-            }
+          const receta = Array.isArray(detalle.recetas) ? detalle.recetas[0] : detalle.recetas;
+          if (!receta?.fecha_emision) {
+            return;
           }
 
-          // Mostrar solo si es la hora actual o próxima (dentro de 1 hora)
-          const tiempoRestante = proximaToma.getTime() - ahora.getTime();
-          const unHoraEnMs = 60 * 60 * 1000;
+          // Verificar que el tratamiento esté vigente
+          const fechaInicioTratamiento = new Date(receta.fecha_emision);
           
-          console.log('Tiempo restante para', detalle.nombre_medicamento, ':', tiempoRestante / 60000, 'minutos');
+          let fechaFinTratamiento;
+          if (duracionDias && duracionDias > 0) {
+            fechaFinTratamiento = new Date(fechaInicioTratamiento);
+            fechaFinTratamiento.setDate(fechaFinTratamiento.getDate() + duracionDias);
+            fechaFinTratamiento.setHours(23, 59, 59, 999);
+          } else {
+            fechaFinTratamiento = new Date('2099-12-31');
+          }
+
+          if (ahora < fechaInicioTratamiento || ahora > fechaFinTratamiento) {
+            console.log(`⏭️ Medicamento ${detalle.nombre_medicamento} fuera de período`);
+            return;
+          }
+
+          // Obtener historial de tomas
+          const historialTomas = obtenerHistorialTomas(detalle.id_detalle);
           
-          // Ventana ampliada: 2 horas antes a 8 horas adelante para testing
-          if (tiempoRestante <= 8 * unHoraEnMs && tiempoRestante >= -2 * unHoraEnMs) {
-            const receta = Array.isArray(detalle.recetas) ? detalle.recetas[0] : detalle.recetas;
+          // ✅ Calcular próxima hora PROGRAMADA (no basada en cuándo se tomó)
+          const proximaTomaProgramada = calcularProximaHoraProgramada(
+            horaPrimeraToma, 
+            frecuenciaHoras, 
+            historialTomas,
+            ahora,
+            fechaInicioTratamiento
+          );
+
+          if (!proximaTomaProgramada) {
+            return;
+          }
+
+          if (proximaTomaProgramada > fechaFinTratamiento) {
+            console.log(`⏭️ Próxima toma de ${detalle.nombre_medicamento} fuera del período de tratamiento`);
+            return;
+          }
+
+          // Ventana de visualización: 15 minutos antes y 2 horas después
+          const tiempoRestante = proximaTomaProgramada.getTime() - ahora.getTime();
+          const VENTANA_ANTES = 15 * 60 * 1000;  // 15 minutos antes MODIFICAR PARA PRUEBAS
+          const VENTANA_DESPUES = 2 * 60 * 60 * 1000; // 2 horas
+          
+          // ✅ Verificar si esta hora programada específica ya fue marcada como tomada
+          const yaFueTomadaEstaHora = historialTomas.some(toma => {
+            const fechaToma = new Date(toma);
+            // Tolerancia de 1 minuto para considerar que es la misma hora programada
+            return Math.abs(fechaToma.getTime() - proximaTomaProgramada.getTime()) < 60000;
+          });
+
+          if (yaFueTomadaEstaHora) {
+            console.log(`✅ Ya tomado: ${detalle.nombre_medicamento} programado para ${proximaTomaProgramada.toLocaleTimeString('es-AR')}`);
+            return; // No mostrar si ya fue tomado en esta hora programada
+          }
+          
+          // Mostrar solo si está dentro de la ventana de tiempo
+          if (tiempoRestante <= VENTANA_ANTES && tiempoRestante >= -VENTANA_DESPUES) {
+            console.log(`📋 Mostrando: ${detalle.nombre_medicamento} para ${proximaTomaProgramada.toLocaleTimeString('es-AR')}`);
             
-            console.log('Agregando medicamento:', detalle.nombre_medicamento);
-            
-            medicamentos.push({
+            medicamentosActualizados.push({
               id_detalle: detalle.id_detalle,
               nombre: detalle.nombre_medicamento,
               dosis: detalle.dosis,
-              hora: proximaToma.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
-              fecha_hora_programada: proximaToma.toISOString(),
+              hora: proximaTomaProgramada.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
+              fecha_hora_programada: proximaTomaProgramada.toISOString(),
               tomado: false,
               tipo: 'Medicamento',
               duracion_dias: detalle.duracion_dias,
               cantidad_total: detalle.cantidad_total,
-              instrucciones: instruccionesObj.instrucciones || detalle.instrucciones_detalladas,
+              instrucciones: instruccionesObj.instrucciones || '',
               frecuencia_horas: frecuenciaHoras,
               receta_id: receta?.id_receta,
-              fecha_receta: receta?.fecha_emision
+              fecha_receta: receta?.fecha_emision,
+              fecha_inicio_tratamiento: fechaInicioTratamiento.toISOString(),
+              fecha_fin_tratamiento: fechaFinTratamiento.toISOString(),
+              es_atrasado: tiempoRestante < 0
             });
           } else {
-            console.log('Medicamento fuera de ventana:', detalle.nombre_medicamento, 'tiempo restante:', tiempoRestante / 60000, 'minutos');
+            console.log(`⏰ Fuera de ventana: ${detalle.nombre_medicamento} programado para ${proximaTomaProgramada.toLocaleTimeString('es-AR')} (${Math.round(tiempoRestante / 60000)} min)`);
           }
         } catch (err) {
           console.error('Error procesando medicamento:', err);
         }
       });
 
+      // Ordenar por hora de toma
+      medicamentosActualizados.sort((a, b) => {
+        const fechaA = new Date(a.fecha_hora_programada);
+        const fechaB = new Date(b.fecha_hora_programada);
+        return fechaA.getTime() - fechaB.getTime();
+      });
+
+      medicamentos = medicamentosActualizados;
       loading = false;
-      console.log('Medicamentos cargados:', medicamentos);
 
     } catch (error) {
       console.error('Error cargando medicamentos:', error);
@@ -204,23 +244,136 @@
     }
   }
 
-  // Obtener última toma de un medicamento del localStorage
-  function obtenerUltimaToma(idDetalle) {
+  // ✅ NUEVA FUNCIÓN: Calcular próxima HORA PROGRAMADA (independiente de cuándo se tomó)
+  function calcularProximaHoraProgramada(horaPrimeraToma, frecuenciaHoras, historialTomas, ahora, fechaInicioTratamiento) {
+    const [horas, minutos] = horaPrimeraToma.split(':').map(Number);
+    
+    // Para medicamentos semanales/mensuales (>= 24 horas)
+    if (frecuenciaHoras >= 24) {
+      const diasFrecuencia = Math.floor(frecuenciaHoras / 24);
+      
+      const primeraTomaTratamiento = new Date(fechaInicioTratamiento);
+      primeraTomaTratamiento.setHours(horas, minutos, 0, 0);
+      
+      // Calcular todas las horas programadas desde el inicio
+      let horaProgramada = new Date(primeraTomaTratamiento);
+      
+      while (horaProgramada <= ahora) {
+        // Verificar si esta hora ya fue tomada
+        const yaFueTomada = historialTomas.some(toma => {
+          const fechaToma = new Date(toma);
+          return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 60000;
+        });
+        
+        // Si no fue tomada y es una hora pasada reciente, podría mostrarse (ventana de 2h)
+        if (!yaFueTomada) {
+          const tiempoDesdeHora = ahora.getTime() - horaProgramada.getTime();
+          if (tiempoDesdeHora <= 2 * 60 * 60 * 1000) { // Dentro de 2 horas
+            return horaProgramada;
+          }
+        }
+        
+        // Siguiente hora programada
+        horaProgramada.setDate(horaProgramada.getDate() + diasFrecuencia);
+      }
+      
+      return horaProgramada; // Próxima hora futura
+    }
+    
+    // Para medicamentos diarios (< 24 horas) - Ej: cada 2, 4, 6, 8 horas
+    const tomasPorDia = Math.floor(24 / frecuenciaHoras);
+    
+    // Generar todas las horas programadas de hoy y mañana
+    const horasProgramadas = [];
+    
+    // Horas de hoy
+    const hoyInicio = new Date(ahora);
+    hoyInicio.setHours(0, 0, 0, 0);
+    
+    for (let dia = 0; dia < 2; dia++) { // Hoy y mañana
+      const diaBase = new Date(hoyInicio);
+      diaBase.setDate(diaBase.getDate() + dia);
+      
+      for (let i = 0; i < tomasPorDia; i++) {
+        const horaProgramada = new Date(diaBase);
+        horaProgramada.setHours(horas + (i * frecuenciaHoras), minutos, 0, 0);
+        
+        // Solo agregar si es después del inicio del tratamiento
+        if (horaProgramada >= fechaInicioTratamiento) {
+          horasProgramadas.push(horaProgramada);
+        }
+      }
+    }
+    
+    // Ordenar cronológicamente
+    horasProgramadas.sort((a, b) => a.getTime() - b.getTime());
+    
+    // Encontrar la primera hora programada que:
+    // 1. No haya sido tomada, Y
+    // 2. Esté dentro de la ventana de visualización (15 min antes hasta 2h después de ahora)
+    
+    for (const horaProgramada of horasProgramadas) {
+      // Verificar si ya fue tomada
+      const yaFueTomada = historialTomas.some(toma => {
+        const fechaToma = new Date(toma);
+        return Math.abs(fechaToma.getTime() - horaProgramada.getTime()) < 60000;
+      });
+      
+      if (!yaFueTomada) {
+        return horaProgramada; // Primera hora no tomada
+      }
+    }
+    
+    // Si todas fueron tomadas, retornar null (no hay pendientes)
+    return null;
+  }
+
+  // Obtener historial de tomas del localStorage
+  function obtenerHistorialTomas(idDetalle) {
     try {
       const tomas = JSON.parse(localStorage.getItem('tomas_medicamentos') || '{}');
-      const fechaStr = tomas[idDetalle];
-      return fechaStr ? new Date(fechaStr) : null;
+      const historial = tomas[idDetalle];
+      
+      if (!historial) return [];
+      
+      if (typeof historial === 'string') {
+        return [historial];
+      }
+      
+      if (Array.isArray(historial)) {
+        return historial;
+      }
+      
+      return [];
     } catch {
-      return null;
+      return [];
     }
   }
 
-  // Guardar toma en localStorage
-  function guardarToma(idDetalle) {
+  // ✅ Guardar toma con la hora PROGRAMADA (no la hora actual)
+  function guardarToma(idDetalle, fechaHoraProgramada) {
     try {
       const tomas = JSON.parse(localStorage.getItem('tomas_medicamentos') || '{}');
-      tomas[idDetalle] = new Date().toISOString();
+      
+      if (!tomas[idDetalle]) {
+        tomas[idDetalle] = [];
+      }
+      
+      if (typeof tomas[idDetalle] === 'string') {
+        tomas[idDetalle] = [tomas[idDetalle]];
+      }
+      
+      // Agregar la hora PROGRAMADA (no la hora actual de cuando se marcó)
+      tomas[idDetalle].push(fechaHoraProgramada);
+      
+      // Guardar solo las últimas 100 tomas
+      if (tomas[idDetalle].length > 100) {
+        tomas[idDetalle] = tomas[idDetalle].slice(-100);
+      }
+      
       localStorage.setItem('tomas_medicamentos', JSON.stringify(tomas));
+      
+      console.log(`💾 Guardado: ${idDetalle} para hora programada ${new Date(fechaHoraProgramada).toLocaleString('es-AR')}`);
     } catch (err) {
       console.error('Error guardando toma:', err);
     }
@@ -228,16 +381,16 @@
   
   async function marcarTomado(medicamento) {
     try {
-      // Guardar la toma en localStorage
-      guardarToma(medicamento.id_detalle);
+      // Guardar con la fecha/hora PROGRAMADA (no la actual)
+      guardarToma(medicamento.id_detalle, medicamento.fecha_hora_programada);
 
       // Marcar como tomado visualmente
       medicamento.tomado = true;
 
-      // Esperar un momento y recargar para mostrar la siguiente toma
+      // Recargar después de medio segundo
       setTimeout(() => {
         cargarMedicamentos();
-      }, 1500);
+      }, 500);
 
     } catch (error) {
       console.error('Error marcando toma:', error);
@@ -263,7 +416,7 @@
     } else if (action === 'recetas') {
       alert('Ver Recetas Médicas - Funcionalidad próximamente');
     } else if (action === 'contacto') {
-      alert('Contacto de Emergencia - FuncionalIDAD próximamente');
+      alert('Contacto de Emergencia - Funcionalidad próximamente');
     } else if (action === 'ayuda') {
       alert('Centro de Ayuda y Soporte - Funcionalidad próximamente');
     }
@@ -273,7 +426,15 @@
 <div class="app-container">
   <header class="header">
     <div class="header-content">
-      <div class="profile-section" role="button" tabindex="0" onclick={() => showMenu = !showMenu} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (showMenu = !showMenu)} style="cursor: pointer;">
+      <div 
+        class="profile-section" 
+        role="button" 
+        tabindex="0" 
+        onclick={() => showMenu = !showMenu} 
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (showMenu = !showMenu)} 
+        style="cursor: pointer;"
+        aria-label="Abrir menú de usuario"
+      >
         <div class="avatar">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
@@ -349,7 +510,7 @@
         {/if}
       </div>
       <div class="header-actions">
-        <button class="notification-btn" onclick={() => showNotifications = !showNotifications}>
+        <button class="notification-btn" onclick={() => showNotifications = !showNotifications} aria-label="Abrir notificaciones">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
             <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
@@ -361,7 +522,7 @@
           <div class="notifications-panel">
             <div class="notifications-header">
               <h4>Notificaciones</h4>
-              <button class="close-notifications" onclick={() => showNotifications = false} title="Cerrar notificaciones" aria-label="Cerrar panel de notificaciones">
+              <button class="close-notifications" onclick={() => showNotifications = false} aria-label="Cerrar notificaciones">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="18" x2="6" y1="6" y2="18"/>
                   <line x1="6" x2="18" y1="6" y2="18"/>
@@ -408,7 +569,7 @@
       {#if loading}
         Cargando medicamentos...
       {:else if medicamentos.length === 0}
-        No tienes medicamentos asignados
+        No tienes medicamentos pendientes en este momento
       {:else}
         Tienes {medicamentos.filter(m => !m.tomado).length} medicamento{medicamentos.filter(m => !m.tomado).length !== 1 ? 's' : ''} pendiente{medicamentos.filter(m => !m.tomado).length !== 1 ? 's' : ''}
       {/if}
@@ -427,8 +588,8 @@
             <rect width="20" height="14" x="2" y="7" rx="2" ry="2"/>
             <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
           </svg>
-          <h3>No tienes medicamentos asignados</h3>
-          <p>Tu médico aún no te ha prescrito ningún medicamento</p>
+          <h3>No hay medicamentos pendientes</h3>
+          <p>Los medicamentos aparecerán 15 minutos antes de la hora programada</p>
         </div>
       {:else}
         <Home medicamentos={medicamentos} onToggleMed={marcarTomado} />
@@ -477,14 +638,14 @@
   
   .app-container {
     min-height: 100vh;
-    background: linear-gradient(to bottom, var(--color-50) 0%, var(--color-100) 100%);
+    background: linear-gradient(to bottom, #e0f2f1 0%, #b2dfdb 100%);
     padding-bottom: 80px;
     max-width: 100%;
     overflow-x: hidden;
   }
   
   .header {
-    background: linear-gradient(135deg, var(--color-600) 0%, var(--color-500) 100%);
+    background: linear-gradient(135deg, #26a69a 0%, #4fa69e 100%);
     padding: 20px;
     color: white;
   }
@@ -727,7 +888,7 @@
   }
   
   .notification-icon.new {
-    background: var(--color-100);
+    background: #e0f2f1;
   }
   
   .notification-icon svg {
@@ -737,7 +898,7 @@
   }
   
   .notification-icon.new svg {
-    color: var(--color-600);
+    color: #26a69a;
   }
   
   .notification-content {
@@ -854,8 +1015,8 @@
   }
   
   .nav-item.active {
-    color: var(--color-600);
-    background: var(--color-100);
+    color: #26a69a;
+    background: #e0f2f1;
   }
   
   @media (max-width: 768px) {
